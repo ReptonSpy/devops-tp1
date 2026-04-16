@@ -1,0 +1,115 @@
+# =============================================================
+#  CI Pipeline — TP1 DevOps
+#  Fil rouge : commit -> tests -> build Docker -> push Docker Hub
+# =============================================================
+
+name: CI Pipeline
+
+# Déclencheurs : push sur main + pull requests ciblant main
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:   # permet un déclenchement manuel depuis l'onglet Actions
+
+# Variables d'environnement globales (réutilisées par les jobs)
+env:
+  IMAGE_NAME: devops-tp
+  NODE_VERSION: '20'
+
+jobs:
+
+  # ---------------------------------------------------------
+  # Job 1 : TEST — lint + tests unitaires Jest
+  # ---------------------------------------------------------
+  test:
+    name: Tests unitaires
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout du code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Installation des dépendances
+        run: npm ci
+
+      - name: Lancement des tests Jest
+        run: npm test
+
+  # ---------------------------------------------------------
+  # Job 2 : BUILD & PUSH — construit l'image Docker et la
+  # publie sur Docker Hub. Ne s'exécute qu'après le job "test"
+  # et uniquement sur un push vers main (pas sur les PR).
+  # ---------------------------------------------------------
+  build-push:
+    name: Build & Push Docker Hub
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Checkout du code
+        uses: actions/checkout@v4
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_TOKEN }}
+
+      - name: Extraction du SHA court du commit
+        id: vars
+        run: echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+
+      - name: Build & push de l'image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: |
+            ${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:latest
+            ${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:${{ steps.vars.outputs.sha_short }}
+          build-args: |
+            APP_VERSION=${{ steps.vars.outputs.sha_short }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Récapitulatif
+        run: |
+          echo "Image publiée : ${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:${{ steps.vars.outputs.sha_short }}"
+          echo "Tag latest    : ${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:latest"
+
+  # ---------------------------------------------------------
+  # Job 3 : NOTIFY — (à compléter au TP3)
+  # Envoi d'une notification au webhook n8n avec le statut
+  # du build. Laissé en commentaire pour le TP1.
+  # ---------------------------------------------------------
+  # notify:
+  #   name: Notification n8n
+  #   needs: build-push
+  #   runs-on: ubuntu-latest
+  #   if: always()
+  #   steps:
+  #     - name: POST vers le webhook n8n
+  #       run: |
+  #         curl -X POST "${{ secrets.N8N_WEBHOOK_URL }}" \
+  #           -H 'Content-Type: application/json' \
+  #           -d '{
+  #             "status": "${{ needs.build-push.result }}",
+  #             "branch": "${{ github.ref_name }}",
+  #             "author": "${{ github.actor }}",
+  #             "image":  "${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:${{ github.sha }}",
+  #             "run_url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}",
+  #             "commit_message": ${{ toJSON(github.event.head_commit.message) }}
+  #           }'
